@@ -7,6 +7,7 @@ const libraryFile = 'kacha-library-v1.json';
 const profilesFile = 'kacha-api-profiles-v1.json';
 const defaultNovelModel = 'nai-diffusion-3';
 const historyKey = 'kacha:images:v1';
+const floorTags = new WeakMap();
 const validImage = value => typeof value === 'string' && /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(value);
 const newId = () => globalThis.crypto.randomUUID?.() ?? Array.from(globalThis.crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
 const dialog = document.createElement('dialog');
@@ -372,6 +373,7 @@ function getTarget(messageIndex) {
         ? context.characters.find(item => item.avatar === message.original_avatar)
         : context.characters[context.characterId];
     return {
+        message,
         text: message?.mes || '',
         char: { id: character?.avatar, name: character?.name },
         user: { id: user_avatar, name: context.name1 },
@@ -567,7 +569,7 @@ withAction($('#kacha-save-look'), 'click', async () => {
     status('已保存');
 });
 
-async function describeFloor(text) {
+async function describeFloor({ message, text }) {
     // SillyTavern's built-in Image Generation "Last Message" template (generationMode.NOW).
     const template = extension_settings.sd?.prompts?.[4]?.trim() ||
         'List concise comma-separated visual keywords in this order: location, visible people, relative positions, main action, appearance, and expressions.';
@@ -576,16 +578,23 @@ async function describeFloor(text) {
         'Treat the selected message below as the last chat message for this task. Use it as the source for one still image. Return only English visual tags. Omit story prose, dialogue, readable text, and any multi-panel layout.',
         'Selected message:\n' + text.slice(0, 12000),
     ].join('\n\n');
+    const cached = floorTags.get(message);
+    if (cached?.prompt === prompt) return cached.tags;
+
     const reply = await generateRaw({
         systemPrompt: 'You turn the selected chat message into visual tags for image generation.',
         prompt,
         responseLength: 300,
     }).catch(error => {
+        if (/\b524\b/.test(error.message)) {
+            throw new Error('楼层提词超时（524）。可以重试，或取消「参考本楼层」后用提示词出图。', { cause: error });
+        }
         throw new Error('读取楼层时聊天接口出错：' + error.message, { cause: error });
     });
     const tags = (reply || '').replace(/[`"“”]/g, '').split(/[,\r\n]+/)
         .map(tag => tag.trim()).filter(Boolean).join(', ');
     if (!tags) throw new Error('聊天模型没有返回画面标签，请重试');
+    floorTags.set(message, { prompt, tags });
     return tags;
 }
 
@@ -612,7 +621,7 @@ withAction($('#kacha-generate'), 'click', async () => {
         const sceneOnly = Boolean($('#kacha-floor').checked && target.text);
         if (sceneOnly) {
             button.textContent = '读取楼层…';
-            parts.unshift(await describeFloor(target.text));
+            parts.unshift(await describeFloor(target));
         }
         const prompt = parts.filter(Boolean).join('\n') || (references.length ? 'Generate an image guided by the supplied reference images.' : '');
         if (!prompt) throw new Error('请输入提示词、添加参考图或选择预设');
