@@ -7,6 +7,7 @@ const libraryFile = 'kacha-library-v1.json';
 const profilesFile = 'kacha-api-profiles-v1.json';
 const defaultNovelModel = 'nai-diffusion-3';
 const historyKey = 'kacha:images:v1';
+const draftKey = 'kacha:draft:v1';
 const floorTags = new WeakMap();
 const validImage = value => typeof value === 'string' && /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(value);
 const newId = () => globalThis.crypto.randomUUID?.() ?? Array.from(globalThis.crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
@@ -95,6 +96,13 @@ imageJob.hidden = true;
 let imageJobRunning = false;
 let imageJobLabel = '';
 const images = { draft: [], preset: [], look: [] };
+let draft = {};
+try {
+    const savedDraft = JSON.parse(localStorage.getItem(draftKey) || 'null');
+    if (savedDraft && typeof savedDraft === 'object' && !Array.isArray(savedDraft)) draft = savedDraft;
+} catch {
+    // Continue with an empty draft if storage is unavailable.
+}
 let library = { presets: [], looks: {} };
 let libraryReady = false;
 let profiles = { entries: [], active: null };
@@ -203,7 +211,7 @@ function setOptions(select, choices, placeholder, selected) {
 
 function renderPresets(selected = '') {
     const preset = $('#kacha-preset');
-    setOptions(preset, library.presets, '预设', preset.value);
+    setOptions(preset, library.presets, '预设', draft.preset);
     const editor = $('#kacha-edit-preset');
     setOptions(editor, library.presets, '新建预设', selected);
     editPreset();
@@ -409,11 +417,7 @@ async function open(messageIndex) {
     libraryReady = false;
     library = { presets: [], looks: {} };
     renderPresets();
-    images.draft = [];
-    $('#kacha-prompt').value = '';
-    $('#kacha-preset').value = '';
     $('#kacha-result').replaceChildren();
-    for (const type of ['floor', 'char', 'user']) $('#kacha-' + type).checked = false;
     $('#kacha-floor').disabled = !target.text;
     for (const type of ['char', 'user']) $('#kacha-' + type).disabled = true;
     renderImages('draft');
@@ -452,6 +456,25 @@ withAction($('#kacha-service'), 'change', async event => {
         throw error;
     }
 });
+function rememberDraft(field, value) {
+    draft[field] = value;
+    try {
+        localStorage.setItem(draftKey, JSON.stringify(draft));
+    } catch {
+        // Keep the draft for the current page even if storage is full.
+    }
+}
+
+const draftPrompt = $('#kacha-prompt');
+draftPrompt.value = typeof draft.prompt === 'string' ? draft.prompt : '';
+draftPrompt.addEventListener('input', () => rememberDraft('prompt', draftPrompt.value));
+const draftPreset = $('#kacha-preset');
+draftPreset.addEventListener('change', () => rememberDraft('preset', draftPreset.value));
+for (const type of ['floor', 'char', 'user']) {
+    const checkbox = $('#kacha-' + type);
+    checkbox.checked = draft[type] === true;
+    checkbox.addEventListener('change', () => rememberDraft(type, checkbox.checked));
+}
 $('#kacha-edit-profile').addEventListener('change', editProfile);
 $('#kacha-settings-service').addEventListener('change', showServiceFields);
 $('#kacha-edit-preset').addEventListener('change', editPreset);
