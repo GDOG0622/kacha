@@ -1,7 +1,11 @@
 import { generateRaw, getRequestHeaders, user_avatar } from '/script.js';
 import { getContext } from '/scripts/extensions.js';
 
-const server = '/api/plugins/kacha';
+import { apiBase, generateCustom, generateNovel, listModels, novelModels, toBase64 } from './providers.js';
+
+const libraryFile = 'kacha-library-v1.json';
+const configKey = 'kacha:service-config:v1';
+const defaultNovelModel = 'nai-diffusion-3';
 const historyKey = 'kacha:images:v1';
 const servicesKey = 'kacha:service';
 const validImage = value => typeof value === 'string' && /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(value);
@@ -33,8 +37,8 @@ dialog.innerHTML = `
                 <label><input type="checkbox" id="kacha-floor">参考本楼层</label>
                 <label><input type="checkbox" id="kacha-char">Char</label>
                 <label><input type="checkbox" id="kacha-user">User</label>
+                <button type="button" id="kacha-generate">生成</button>
             </div>
-            <button type="button" class="menu_button" id="kacha-generate">生成</button>
             <div id="kacha-result"></div>
         </section>
         <section data-view="presets" hidden>
@@ -68,8 +72,11 @@ dialog.innerHTML = `
                 <div class="kacha-row"><button type="submit">连接</button><select id="kacha-model" aria-label="模型" disabled></select></div>
             </form>
             <form id="kacha-novel" hidden>
-                <label>NovelAI Key<input id="kacha-novel-key" type="password" autocomplete="off" required></label>
-                <button type="submit">保存</button>
+                <label>NovelAI Key<input id="kacha-novel-key" type="password" autocomplete="off"></label>
+                <div class="kacha-row">
+                    <select id="kacha-novel-model" aria-label="NovelAI 模型"></select>
+                    <button type="submit">保存</button>
+                </div>
             </form>
         </section>
     </main>
@@ -82,15 +89,32 @@ let config = {};
 let target = {};
 let activeTab;
 let connected;
-let configLoading;
 let generationId = 0;
 
-async function api(endpoint, method = 'GET', body) {
-    const response = await fetch(server + endpoint, {
-        method, headers: getRequestHeaders(), body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || (response.status === 404 ? '请安装并启用咔嚓服务端插件' : '请求失败（' + response.status + '）'));
+function loadConfig() {
+    try {
+        return JSON.parse(localStorage.getItem(configKey)) || {};
+    } catch {
+        return {};
+    }
+}
+
+function saveConfig(service, value) {
+    const next = { ...loadConfig(), [service]: value };
+    try {
+        localStorage.setItem(configKey, JSON.stringify(next));
+    } catch {
+        throw new Error('浏览器无法保存服务设置');
+    }
+    config = next;
+}
+
+async function loadLibrary() {
+    const response = await fetch('/user/files/' + libraryFile, { cache: 'no-store' });
+    if (response.status === 404) return { presets: [], looks: {} };
+    if (!response.ok) throw new Error('无法读取酒馆预设库');
+    const data = await response.json();
+    if (!Array.isArray(data?.presets) || !data.looks || typeof data.looks !== 'object') throw new Error('酒馆预设库格式有误');
     return data;
 }
 
@@ -275,15 +299,27 @@ function showHistory() {
 
 async function saveLibrary(next) {
     if (!libraryReady) throw new Error('预设库尚未加载，请重新打开面板');
-    library = await api('/library', 'PUT', next);
+    const bytes = new TextEncoder().encode(JSON.stringify(next));
+    if (bytes.length > 40 * 1024 * 1024) throw new Error('预设库空间不足');
+    const response = await fetch('/api/files/upload', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({ name: libraryFile, data: toBase64(bytes) }),
+    });
+    if (!response.ok) throw new Error('无法保存酒馆预设库');
+    library = next;
 }
 
 function showConfig() {
     connected = undefined;
     $('#kacha-key').value = $('#kacha-novel-key').value = '';
     $('#kacha-url').value = config.custom?.url || '';
-    $('#kacha-key').placeholder = config.custom?.ready ? '已保存' : '';
-    $('#kacha-novel-key').placeholder = config.novelReady ? '已保存' : '';
+    $('#kacha-key').placeholder = config.custom?.key ? '已保存' : '';
+    $('#kacha-novel-key').placeholder = config.novel?.key ? '已保存' : '';
+    const novelSelect = $('#kacha-novel-model');
+    novelSelect.replaceChildren(...novelModels.map(([id, name]) => new Option(name, id)));
+    novelSelect.value = config.novel?.model || defaultNovelModel;
+    if (!novelSelect.value) novelSelect.value = defaultNovelModel;
     const choices = config.custom?.model ? [{ id: config.custom.model, name: config.custom.model }] : [];
     setOptions($('#kacha-model'), choices, '模型', config.custom?.model);
     $('#kacha-model').disabled = true;
@@ -330,14 +366,13 @@ async function open(messageIndex) {
     selectService(service);
     dialog.showModal();
     const currentOpen = generationId;
-    configLoading = Promise.all([api('/library'), api('/config')]);
+    config = loadConfig();
+    showConfig();
     try {
-        const [nextLibrary, nextConfig] = await configLoading;
+        const nextLibrary = await loadLibrary();
         if (currentOpen !== generationId || !dialog.open) return;
         library = nextLibrary;
         libraryReady = true;
-        config = nextConfig;
-        showConfig();
         renderPresets();
         renderLook();
         for (const type of ['char', 'user']) $('#kacha-' + type).disabled = !library.looks[lookKey(type)];
@@ -366,38 +401,40 @@ for (const input of [$('#kacha-url'), $('#kacha-key')]) input.addEventListener('
 });
 
 withAction($('#kacha-custom'), 'submit', async () => {
-    await configLoading;
-    const url = $('#kacha-url').value.trim();
-    const key = $('#kacha-key').value.trim();
-    const { models } = await api('/models', 'POST', { url, key });
-    if ($('#kacha-url').value.trim() !== url || $('#kacha-key').value.trim() !== key) return;
+    const currentOpen = generationId;
+    const inputUrl = $('#kacha-url').value.trim();
+    const inputKey = $('#kacha-key').value.trim();
+    const url = apiBase(inputUrl);
+    const key = inputKey || (config.custom?.url === url ? config.custom.key : '');
+    if (!key) throw new Error('请输入 API Key');
+    const models = await listModels(url, key);
+    if (currentOpen !== generationId || !dialog.open
+        || $('#kacha-url').value.trim() !== inputUrl || $('#kacha-key').value.trim() !== inputKey) return;
     connected = { url, key };
-    const previous = config.custom?.url === url.replace(/\/+$/, '') ? config.custom?.model : undefined;
+    const previous = config.custom?.url === url ? config.custom.model : undefined;
     setOptions($('#kacha-model'), models.map(id => ({ id, name: id })), '选择模型', previous);
     $('#kacha-model').disabled = !models.length;
     if (!models.length) status('服务未返回模型');
-    else if ($('#kacha-model').value) await saveModel();
+    else if ($('#kacha-model').value) saveModel();
 });
 
-async function saveModel() {
+function saveModel() {
     const model = $('#kacha-model').value;
     if (!model || !connected) return;
-    await api('/custom', 'PUT', { ...connected, model });
-    config = await api('/config');
+    saveConfig('custom', { ...connected, model });
     $('#kacha-key').value = '';
     $('#kacha-key').placeholder = '已保存';
-    connected = { url: config.custom.url };
     status('已保存');
 }
 
 withAction($('#kacha-model'), 'change', saveModel);
-withAction($('#kacha-novel'), 'submit', async () => {
-    await configLoading;
+withAction($('#kacha-novel'), 'submit', () => {
     const input = $('#kacha-novel-key');
-    await api('/novel', 'PUT', { key: input.value });
+    const key = input.value.trim() || config.novel?.key;
+    if (!key) throw new Error('请输入 NovelAI Key');
+    saveConfig('novel', { key, model: $('#kacha-novel-model').value });
     input.value = '';
     input.placeholder = '已保存';
-    config.novelReady = true;
     status('已保存');
 });
 
@@ -492,7 +529,9 @@ withAction($('#kacha-generate'), 'click', async () => {
         const prompt = parts.filter(Boolean).join('\n') || (references.length ? 'Generate an image guided by the supplied reference images.' : '');
         if (!prompt) throw new Error('请输入提示词、添加参考图或选择预设');
         button.textContent = '生成中…';
-        const { image } = await api('/generate', 'POST', { service, prompt, images: references });
+        const image = service === 'novel'
+            ? await generateNovel(config.novel || { model: defaultNovelModel }, prompt, references)
+            : await generateCustom(config.custom || {}, prompt, references);
         if (!validImage(image)) throw new Error('服务返回的图片无效');
         const saved = saveImage({ id: newId(), image });
         if (currentOpen === generationId && dialog.open) {

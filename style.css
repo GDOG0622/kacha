@@ -56,3 +56,10 @@
     font: inherit;
     cursor: pointer;
 }
+.kacha #kacha-generate {
+    margin-left: auto;
+    width: auto;
+    min-width: 4em;
+    white-space: nowrap;
+    writing-mode: horizontal-tb;
+}
