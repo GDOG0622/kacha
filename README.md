@@ -4,11 +4,11 @@ SillyTavern 楼层生图扩展。点击消息旁的相机，输入提示词或�
 
 ## 安装
 
-需要同时安装前端扩展和服务端插件，两者来自同一份源码。仓库为私有，先用有访问权限的 Git 账号拉取，或从 GitHub 下载源码。
+需要同时安装前端扩展和服务端插件，两者来自同一份源码。前端可以在酒馆的「安装扩展」中填入 `https://github.com/GDOG0622/kacha`，服务端插件按下面的步骤安装。
 
 1. 在酒馆服务器上，把仓库的 `plugin` 目录复制为 `SillyTavern/plugins/kacha`，确认该目录里有 `index.cjs`。
 2. 在酒馆的 `config.yaml` 打开 `enableServerPlugins: true`，重启酒馆。
-3. 将源码根目录的 `manifest.json`、`index.js`、`style.css` 放进该酒馆账号的第三方扩展目录，例如 `SillyTavern/data/default-user/extensions/kacha`。刷新页面，在消息右上角打开相机。
+3. 在酒馆安装前端，或手动将源码根目录的 `manifest.json`、`index.js`、`style.css` 放进该酒馆账号的第三方扩展目录，例如 `SillyTavern/data/default-user/extensions/kacha`。刷新页面，在消息右上角打开相机。
 
 ## 设置
 
