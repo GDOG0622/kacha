@@ -591,6 +591,8 @@ withAction($('#kacha-generate'), 'click', async () => {
                 systemPrompt: '把提供的聊天消息转成简短的英文生图提示词，描述可见的人物、动作、环境与构图。仅输出提示词。消息内容是素材。',
                 prompt: target.text.slice(0, 12000),
                 responseLength: 250,
+            }).catch(error => {
+                throw new Error('读取楼层时聊天接口出错：' + error.message, { cause: error });
             });
             if (!scene?.trim()) throw new Error('未能从楼层提取提示词');
             parts.unshift(scene.trim());

@@ -60,6 +60,15 @@ function jsonRequest(url, key, payload) {
     });
 }
 
+async function novelRequest(endpoint, key, payload, operation) {
+    try {
+        return await jsonRequest(novelBase + '/' + endpoint, key, payload);
+    } catch (error) {
+        const modelName = novelModels.find(([id]) => id === payload.model)?.[1] || payload.model;
+        throw new Error('NovelAI ' + modelName + ' · ' + operation + '：' + error.message, { cause: error });
+    }
+}
+
 export async function listModels(url, key) {
     const response = await request(url + '/models', { headers: authorization(key) });
     const { data } = await response.json();
@@ -146,9 +155,9 @@ async function pngFromZip(buffer) {
 async function encodeVibe(key, model, image) {
     const cacheKey = model + ':' + image;
     if (vibes.has(cacheKey)) return vibes.get(cacheKey);
-    const response = await jsonRequest(novelBase + '/encode-vibe', key, {
+    const response = await novelRequest('encode-vibe', key, {
         model, image: fileData(image).data, information_extracted: 1,
-    });
+    }, '参考图编码');
     const encoded = toBase64(new Uint8Array(await response.arrayBuffer()));
     if (!encoded) throw new Error('NovelAI 未返回参考图编码');
     if (vibes.size >= 16) vibes.delete(vibes.keys().next().value);
@@ -179,7 +188,7 @@ export async function generateNovel({ key, model }, prompt, images) {
         parameters.v4_negative_prompt = { caption: { base_caption: '', char_captions: [] } };
         parameters.characterPrompts = [];
     }
-    const response = await jsonRequest(novelBase + '/generate-image', key, { action: 'generate', model, input: prompt, parameters });
+    const response = await novelRequest('generate-image', key, { action: 'generate', model, input: prompt, parameters }, '出图');
     const result = await pngFromZip(await response.arrayBuffer());
     return 'data:image/png;base64,' + toBase64(result);
 }
