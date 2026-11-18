@@ -48,7 +48,8 @@ dialog.innerHTML = `
                 <input type="file" id="kacha-import-file" accept=".json,application/json" hidden>
             </div>
             <input id="kacha-preset-name" placeholder="预设名称" aria-label="预设名称" maxlength="80">
-            <textarea id="kacha-preset-prompt" placeholder="提示词" aria-label="预设提示词"></textarea>
+            <textarea id="kacha-preset-prompt" placeholder="正向提示词" aria-label="正向提示词"></textarea>
+            <textarea id="kacha-preset-negative" placeholder="负向提示词" aria-label="负向提示词"></textarea>
             <div data-images="preset"></div>
             <div class="kacha-row">
                 <button type="button" id="kacha-save-preset">保存</button>
@@ -87,6 +88,12 @@ dialog.innerHTML = `
     </main>
     <footer id="kacha-status" role="status"></footer>`;
 const $ = selector => dialog.querySelector(selector);
+const imageJob = document.createElement('button');
+imageJob.type = 'button';
+imageJob.className = 'kacha-job';
+imageJob.hidden = true;
+let imageJobRunning = false;
+let imageJobLabel = '';
 const images = { draft: [], preset: [], look: [] };
 let library = { presets: [], looks: {} };
 let libraryReady = false;
@@ -148,6 +155,20 @@ function status(message = '') {
     $('#kacha-status').textContent = message;
 }
 
+function showJobStatus(label = imageJobLabel) {
+    imageJobLabel = label;
+    imageJob.textContent = label;
+    imageJob.hidden = dialog.open || !label;
+}
+
+function showJobPanel() {
+    if (!dialog.open) dialog.showModal();
+    showJobStatus(imageJobRunning ? imageJobLabel : '');
+}
+
+imageJob.addEventListener('click', showJobPanel);
+dialog.addEventListener('close', () => showJobStatus());
+
 function tab(name) {
     activeTab = name;
     for (const section of dialog.querySelectorAll('[data-view]')) section.hidden = section.dataset.view !== name;
@@ -192,6 +213,7 @@ function editPreset() {
     const preset = library.presets.find(item => item.id === $('#kacha-edit-preset').value);
     $('#kacha-preset-name').value = preset?.name || '';
     $('#kacha-preset-prompt').value = preset?.prompt || '';
+    $('#kacha-preset-negative').value = preset?.negativePrompt || '';
     images.preset = [...(preset?.images || [])];
     $('#kacha-export').disabled = $('#kacha-delete-preset').disabled = !preset;
     renderImages('preset');
@@ -381,6 +403,7 @@ function getTarget(messageIndex) {
 }
 
 async function open(messageIndex) {
+    showJobStatus('');
     target = getTarget(messageIndex);
     generationId++;
     libraryReady = false;
@@ -508,9 +531,10 @@ withAction($('#kacha-delete-profile'), 'click', async () => {
 withAction($('#kacha-save-preset'), 'click', async () => {
     const name = $('#kacha-preset-name').value.trim();
     const prompt = $('#kacha-preset-prompt').value.trim();
+    const negativePrompt = $('#kacha-preset-negative').value.trim();
     const id = $('#kacha-edit-preset').value || newId();
-    if (!name || (!prompt && !images.preset.length)) throw new Error('请输入名称，并添加提示词或参考图');
-    const preset = { id, name, prompt, images: [...images.preset] };
+    if (!name || (!prompt && !negativePrompt && !images.preset.length)) throw new Error('请输入名称，并添加提示词或参考图');
+    const preset = { id, name, prompt, negativePrompt, images: [...images.preset] };
     const presets = library.presets.some(item => item.id === id)
         ? library.presets.map(item => item.id === id ? preset : item)
         : [...library.presets, preset];
@@ -535,10 +559,14 @@ withAction($('#kacha-import-file'), 'change', async event => {
     const fileData = JSON.parse(await file.text());
     const item = fileData.preset;
     if (fileData.format !== 'kacha-preset-v1' || typeof item?.name !== 'string' || !item.name.trim()
+        || (item.negativePrompt !== undefined && typeof item.negativePrompt !== 'string')
         || typeof item.prompt !== 'string' || !Array.isArray(item.images) || item.images.length > 8 || !item.images.every(validImage)) {
         throw new Error('预设文件无效');
     }
-    const preset = { id: newId(), name: item.name.slice(0, 80), prompt: item.prompt, images: item.images };
+    const preset = {
+        id: newId(), name: item.name.slice(0, 80), prompt: item.prompt,
+        negativePrompt: item.negativePrompt ?? '', images: item.images,
+    };
     await saveLibrary({ ...library, presets: [...library.presets, preset] });
     renderPresets(preset.id);
     status('已导入');
@@ -547,8 +575,8 @@ withAction($('#kacha-import-file'), 'change', async event => {
 $('#kacha-export').addEventListener('click', () => {
     const item = library.presets.find(preset => preset.id === $('#kacha-edit-preset').value);
     if (!item) return;
-    const { name, prompt, images } = item;
-    const blob = new Blob([JSON.stringify({ format: 'kacha-preset-v1', preset: { name, prompt, images } })], { type: 'application/json' });
+    const { name, prompt, negativePrompt = '', images } = item;
+    const blob = new Blob([JSON.stringify({ format: 'kacha-preset-v1', preset: { name, prompt, negativePrompt, images } })], { type: 'application/json' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
     link.download = name + '.kacha.json';
@@ -569,7 +597,7 @@ withAction($('#kacha-save-look'), 'click', async () => {
     status('已保存');
 });
 
-async function describeFloor({ message, text }) {
+async function describeFloor({ message, text }, direction) {
     // SillyTavern's built-in Image Generation "Last Message" template (generationMode.NOW).
     const template = extension_settings.sd?.prompts?.[4]?.trim() ||
         'List concise comma-separated visual keywords in this order: location, visible people, relative positions, main action, appearance, and expressions.';
@@ -577,7 +605,8 @@ async function describeFloor({ message, text }) {
         substituteParams(template),
         'Treat the selected message below as the last chat message for this task. Use it as the source for one still image. Return only English visual tags. Omit story prose, dialogue, readable text, and any multi-panel layout.',
         'Selected message:\n' + text.slice(0, 12000),
-    ].join('\n\n');
+        direction && 'User direction for this image (prioritize these details when choosing the scene):\n' + direction,
+    ].filter(Boolean).join('\n\n');
     const cached = floorTags.get(message);
     if (cached?.prompt === prompt) return cached.tags;
 
@@ -600,9 +629,7 @@ async function describeFloor({ message, text }) {
 
 withAction($('#kacha-generate'), 'click', async () => {
     const button = $('#kacha-generate');
-    const currentOpen = generationId;
     try {
-        button.textContent = '生成中…';
         const profile = profiles.entries.find(item => item.id === $('#kacha-service').value);
         if (!profile) {
             tab('settings');
@@ -617,36 +644,50 @@ withAction($('#kacha-generate'), 'click', async () => {
         const style = [...new Set([...images.draft, ...(preset?.images || [])])].filter(image => !appearance.has(image));
         const references = [...style, ...appearance];
         if (references.length > 8) throw new Error('最多同时使用 8 张参考图');
-        const parts = [preset?.prompt, ...looks.filter(item => item.prompt).map(item => item.name + '：' + item.prompt), $('#kacha-prompt').value.trim()];
+        const direction = $('#kacha-prompt').value.trim();
+        const parts = [preset?.prompt, ...looks.filter(item => item.prompt).map(item => item.name + '：' + item.prompt)];
         const sceneOnly = Boolean($('#kacha-floor').checked && target.text);
-        if (sceneOnly) {
-            button.textContent = '读取楼层…';
-            parts.unshift(await describeFloor(target));
+        if (!sceneOnly && !parts.some(Boolean) && !direction && !references.length) {
+            throw new Error('请输入提示词、添加参考图或选择预设');
         }
-        const prompt = parts.filter(Boolean).join('\n') || (references.length ? 'Generate an image guided by the supplied reference images.' : '');
-        if (!prompt) throw new Error('请输入提示词、添加参考图或选择预设');
-        button.textContent = '生成中…';
-        const options = { sceneOnly, styleCount: style.length };
+        const options = { sceneOnly, styleCount: style.length, negativeTags: preset?.negativePrompt || '' };
         if (sceneOnly && profile.service === 'novel') {
             options.positivePrefix = substituteParams(extension_settings.sd?.prompt_prefix || '');
             options.negativePrefix = substituteParams(extension_settings.sd?.negative_prompt || '');
         }
+        const selectedFloor = target;
+        imageJobRunning = true;
+        $('#kacha-result').replaceChildren();
+        dialog.close();
+        if (sceneOnly) {
+            button.textContent = '读取楼层…';
+            showJobStatus('咔嚓 · 读取楼层…');
+            parts.unshift(await describeFloor(selectedFloor, direction));
+        } else {
+            parts.push(direction);
+        }
+        const prompt = parts.filter(Boolean).join('\n') || 'Generate an image guided by the supplied reference images.';
+        button.textContent = '生成中…';
+        showJobStatus('咔嚓 · 生成中…');
         const image = profile.service === 'novel'
             ? await generateNovel(profile, prompt, references, options)
             : await generateCustom(profile, prompt, references, options);
         if (!validImage(image)) throw new Error('服务返回的图片无效');
         const saved = saveImage({ id: newId(), image });
-        if (currentOpen === generationId && dialog.open) {
-            $('#kacha-result').replaceChildren(thumbnail(image));
-            if (!saved) status('浏览器空间不足，本图仅可预览');
-            if (activeTab === 'history') showHistory();
-        }
+        $('#kacha-result').replaceChildren(thumbnail(image));
+        if (!saved) status('浏览器空间不足，本图仅可预览');
+        if (activeTab === 'history') showHistory();
+        showJobStatus(dialog.open ? '' : '咔嚓 · 查看出图');
+    } catch (error) {
+        if (imageJobRunning) showJobStatus(dialog.open ? '' : '咔嚓 · 查看错误');
+        throw error;
     } finally {
+        imageJobRunning = false;
         button.textContent = '生成';
     }
 });
 
-document.body.append(dialog, viewer);
+document.body.append(dialog, viewer, imageJob);
 function decorate(row) {
     const edit = row.querySelector('.mes_edit');
     if (!edit || row.querySelector('.kacha-camera')) return;
@@ -691,6 +732,10 @@ function attach() {
         const button = event.target.closest('.kacha-camera');
         if (!button || dialog.open) return;
         event.stopPropagation();
+        if (imageJobRunning) {
+            showJobPanel();
+            return;
+        }
         open(Number(button.closest('.mes').getAttribute('mesid'))).catch(error => status(error.message));
     });
 }

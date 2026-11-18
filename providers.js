@@ -76,10 +76,13 @@ export async function listModels(url, key) {
     return [...new Set(data.map(item => item?.id).filter(id => typeof id === 'string' && id))];
 }
 
-export async function generateCustom({ url, model, key }, prompt, images, { sceneOnly = false, styleCount = images.length } = {}) {
+export async function generateCustom({ url, model, key }, prompt, images, {
+    sceneOnly = false, styleCount = images.length, negativeTags = '',
+} = {}) {
     if (!url || !model || !key) throw new Error('请先连接自定义服务并选择模型');
     const instructions = [];
     if (sceneOnly) instructions.push('Depict one moment in a single continuous image. No words, captions, panels, or collage.');
+    if (negativeTags) instructions.push('Avoid these visual elements: ' + negativeTags);
     if (styleCount) {
         instructions.push(`Use the first ${styleCount} reference image(s) only for visual style. Follow the prompt for the subject, scene, and composition.`);
     }
@@ -176,18 +179,18 @@ async function encodeVibe(key, model, image) {
 }
 
 export async function generateNovel({ key, model }, prompt, images, {
-    sceneOnly = false, styleCount = images.length, positivePrefix = '', negativePrefix = '',
+    sceneOnly = false, styleCount = images.length, positivePrefix = '', negativePrefix = '', negativeTags = '',
 } = {}) {
     if (!key) throw new Error('请先保存 NovelAI Key');
-    let negativePrompt = '';
+    const negativeParts = [negativeTags];
     if (sceneOnly) {
         prompt = 'single scene, ' + prompt + ', no text';
         const prefix = positivePrefix.replace(/^[,\s]+|[,\s]+$/g, '');
         if (prefix.includes('{prompt}')) prompt = prefix.replace('{prompt}', () => prompt);
         else if (prefix) prompt = prefix + ', ' + prompt;
-        negativePrompt = [negativePrefix.replace(/^[,\s]+|[,\s]+$/g, ''),
-            'text, caption, subtitle, typography, speech bubble, comic panels, collage, split screen'].filter(Boolean).join(', ');
+        negativeParts.unshift(negativePrefix, 'text, caption, subtitle, typography, speech bubble, comic panels, collage, split screen');
     }
+    const negativePrompt = negativeParts.map(part => part.replace(/^[,\s]+|[,\s]+$/g, '')).filter(Boolean).join(', ');
     const v5 = model.startsWith('nai-diffusion-5-');
     const modern = v5 || model.startsWith('nai-diffusion-4');
     const references = [];

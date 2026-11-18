@@ -54,3 +54,19 @@
     white-space: nowrap;
     writing-mode: horizontal-tb;
 }
+.kacha-job {
+    position: fixed;
+    inset-inline-end: 0.75rem;
+    bottom: calc(4rem + env(safe-area-inset-bottom));
+    z-index: 100;
+    color: var(--SmartThemeBodyColor, #eee);
+    background: var(--SmartThemeBlurTintColor, #252525);
+    border: 1px solid var(--SmartThemeBorderColor, #666);
+    border-radius: 5px;
+    padding: 0.4rem 0.65rem;
+    font: inherit;
+    white-space: nowrap;
+    cursor: pointer;
+    backdrop-filter: blur(12px);
+}
+.kacha-job[hidden] { display: none !important; }
