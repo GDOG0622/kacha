@@ -1,4 +1,4 @@
-import { generateQuietPrompt, getRequestHeaders, substituteParams, user_avatar } from '/script.js';
+import { generateRaw, getRequestHeaders, substituteParams, user_avatar } from '/script.js';
 import { extension_settings, getContext } from '/scripts/extensions.js';
 
 import { apiBase, generateCustom, generateNovel, listModels, novelModels, toBase64 } from './providers.js';
@@ -571,13 +571,15 @@ async function describeFloor(text) {
     // SillyTavern's built-in Image Generation "Last Message" template (generationMode.NOW).
     const template = extension_settings.sd?.prompts?.[4]?.trim() ||
         'List concise comma-separated visual keywords in this order: location, visible people, relative positions, main action, appearance, and expressions.';
-    const quietPrompt = [
-        template,
+    const prompt = [
+        substituteParams(template),
         'Treat the selected message below as the last chat message for this task. Use it as the source for one still image. Return only English visual tags. Omit story prose, dialogue, readable text, and any multi-panel layout.',
-        'Selected message:\n' + text,
+        'Selected message:\n' + text.slice(0, 12000),
     ].join('\n\n');
-    const reply = await generateQuietPrompt({
-        quietPrompt,
+    const reply = await generateRaw({
+        systemPrompt: 'You turn the selected chat message into visual tags for image generation.',
+        prompt,
+        responseLength: 300,
     }).catch(error => {
         throw new Error('读取楼层时聊天接口出错：' + error.message, { cause: error });
     });
