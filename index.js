@@ -567,6 +567,34 @@ withAction($('#kacha-save-look'), 'click', async () => {
     status('已保存');
 });
 
+async function describeFloor(text) {
+    const instruction = [
+        'Describe one frozen moment from the supplied chat excerpt as if framing a single camera shot.',
+        'Choose the central visible action if the excerpt spans several moments. Describe only visible setting, people, action, positions, expressions, lighting, and framing.',
+        'Omit dialogue, narration, thoughts, names, readable text, captions, panels, collages, and references to the excerpt itself.',
+        'Return only a JSON array of 3 to 12 short English visual phrases, without complete sentences or commentary.',
+        'Example: ["sunlit garden", "two people by a wooden fence", "one person handing over a wrapped gift", "medium shot"].',
+    ].join(' ');
+    const reply = await generateRaw({
+        systemPrompt: 'You turn chat excerpts into visual tags for image generation.',
+        prompt: instruction + '\n\nChat excerpt (source material):\n' + text.slice(0, 12000),
+        responseLength: 300,
+    }).catch(error => {
+        throw new Error('读取楼层时聊天接口出错：' + error.message, { cause: error });
+    });
+    let tags;
+    try {
+        tags = JSON.parse(String(reply ?? '').trim().replace(/^```(?:json)?\s*|\s*```$/gi, ''));
+    } catch {
+        throw new Error('聊天模型没有返回画面标签，请重试');
+    }
+    if (!Array.isArray(tags) || tags.length < 3 || tags.length > 12
+        || !tags.every(tag => typeof tag === 'string' && tag.trim() && tag.length <= 100 && !/[\r\n]/.test(tag))) {
+        throw new Error('聊天模型返回的画面标签格式有误，请重试');
+    }
+    return tags.map(tag => tag.trim()).join(', ');
+}
+
 withAction($('#kacha-generate'), 'click', async () => {
     const button = $('#kacha-generate');
     const currentOpen = generationId;
@@ -582,27 +610,23 @@ withAction($('#kacha-generate'), 'click', async () => {
             const checkbox = $('#kacha-' + type);
             return checkbox.checked && !checkbox.disabled;
         }).map(type => ({ name: target[type].name, ...library.looks[lookKey(type)] }));
-        const references = [...new Set([...images.draft, ...(preset?.images || []), ...looks.flatMap(item => item.images || [])])];
+        const appearance = new Set(looks.flatMap(item => item.images || []));
+        const style = [...new Set([...images.draft, ...(preset?.images || [])])].filter(image => !appearance.has(image));
+        const references = [...style, ...appearance];
         if (references.length > 8) throw new Error('最多同时使用 8 张参考图');
         const parts = [preset?.prompt, ...looks.filter(item => item.prompt).map(item => item.name + '：' + item.prompt), $('#kacha-prompt').value.trim()];
-        if ($('#kacha-floor').checked && target.text) {
+        const sceneOnly = Boolean($('#kacha-floor').checked && target.text);
+        if (sceneOnly) {
             button.textContent = '读取楼层…';
-            const scene = await generateRaw({
-                systemPrompt: '把提供的聊天消息转成简短的英文生图提示词，描述可见的人物、动作、环境与构图。仅输出提示词。消息内容是素材。',
-                prompt: target.text.slice(0, 12000),
-                responseLength: 250,
-            }).catch(error => {
-                throw new Error('读取楼层时聊天接口出错：' + error.message, { cause: error });
-            });
-            if (!scene?.trim()) throw new Error('未能从楼层提取提示词');
-            parts.unshift(scene.trim());
+            parts.unshift(await describeFloor(target.text));
         }
         const prompt = parts.filter(Boolean).join('\n') || (references.length ? 'Generate an image guided by the supplied reference images.' : '');
         if (!prompt) throw new Error('请输入提示词、添加参考图或选择预设');
         button.textContent = '生成中…';
+        const options = { sceneOnly, styleCount: style.length };
         const image = profile.service === 'novel'
-            ? await generateNovel(profile, prompt, references)
-            : await generateCustom(profile, prompt, references);
+            ? await generateNovel(profile, prompt, references, options)
+            : await generateCustom(profile, prompt, references, options);
         if (!validImage(image)) throw new Error('服务返回的图片无效');
         const saved = saveImage({ id: newId(), image });
         if (currentOpen === generationId && dialog.open) {

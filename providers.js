@@ -76,8 +76,18 @@ export async function listModels(url, key) {
     return [...new Set(data.map(item => item?.id).filter(id => typeof id === 'string' && id))];
 }
 
-export async function generateCustom({ url, model, key }, prompt, images) {
+export async function generateCustom({ url, model, key }, prompt, images, { sceneOnly = false, styleCount = images.length } = {}) {
     if (!url || !model || !key) throw new Error('请先连接自定义服务并选择模型');
+    const instructions = [];
+    if (sceneOnly) instructions.push('Depict one moment in a single continuous image. No words, captions, panels, or collage.');
+    if (styleCount) {
+        instructions.push(`Use the first ${styleCount} reference image(s) only for visual style. Follow the prompt for the subject, scene, and composition.`);
+    }
+    if (images.length > styleCount) {
+        const referenceGroup = styleCount ? 'remaining' : 'supplied';
+        instructions.push(`Use the ${referenceGroup} reference image(s) only for character appearance.`);
+    }
+    if (instructions.length) prompt = [prompt, ...instructions].join('\n');
     let response;
     if (images.length) {
         const body = new FormData();
@@ -165,8 +175,10 @@ async function encodeVibe(key, model, image) {
     return encoded;
 }
 
-export async function generateNovel({ key, model }, prompt, images) {
+export async function generateNovel({ key, model }, prompt, images, { sceneOnly = false, styleCount = images.length } = {}) {
     if (!key) throw new Error('请先保存 NovelAI Key');
+    const negativePrompt = sceneOnly ? 'text, caption, subtitle, typography, speech bubble, comic panels, collage, split screen' : '';
+    if (sceneOnly) prompt = 'single scene, ' + prompt + ', no text';
     const v5 = model.startsWith('nai-diffusion-5-');
     const modern = v5 || model.startsWith('nai-diffusion-4');
     const references = [];
@@ -178,14 +190,16 @@ export async function generateNovel({ key, model }, prompt, images) {
         width: 832, height: 1216, steps: 28, scale: 5,
         sampler: 'k_euler_ancestral', noise_schedule: v5 ? 'karras' : 'native',
         n_samples: 1, seed: crypto.getRandomValues(new Uint32Array(1))[0],
-        negative_prompt: '', ucPreset: 0, qualityToggle: false,
+        negative_prompt: negativePrompt, ucPreset: 0, qualityToggle: false,
         reference_image_multiple: references,
         reference_information_extracted_multiple: references.map(() => 1),
-        reference_strength_multiple: references.map(() => 0.6 / references.length),
+        reference_strength_multiple: references.map((_, index) => index < styleCount
+            ? 0.3 / styleCount
+            : 0.55 / (references.length - styleCount)),
     };
     if (modern) {
         parameters.v4_prompt = { caption: { base_caption: prompt, char_captions: [] }, use_coords: false, use_order: true };
-        parameters.v4_negative_prompt = { caption: { base_caption: '', char_captions: [] } };
+        parameters.v4_negative_prompt = { caption: { base_caption: negativePrompt, char_captions: [] } };
         parameters.characterPrompts = [];
     }
     const response = await novelRequest('generate-image', key, { action: 'generate', model, input: prompt, parameters }, '出图');
