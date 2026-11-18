@@ -1,0 +1,58 @@
+.kacha {
+    color: var(--SmartThemeBodyColor, #eee);
+    background: var(--SmartThemeBlurTintColor, #252525);
+    border: 1px solid var(--SmartThemeBorderColor, #666);
+    border-radius: 10px;
+    width: min(32rem, calc(100% - 1.5rem));
+    max-height: 85dvh;
+    padding: 0.9rem;
+    box-sizing: border-box;
+    overflow: auto;
+    backdrop-filter: blur(20px);
+}
+
+.kacha::backdrop { background: #0008; }
+.kacha [hidden] { display: none !important; }
+.kacha main { margin-top: 0.75rem; }
+.kacha section, .kacha form { display: grid; gap: 0.65rem; }
+.kacha nav, .kacha-row { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
+.kacha header nav { margin-left: auto; }
+.kacha header strong { white-space: nowrap; }
+.kacha button, .kacha select {
+    color: inherit;
+    background: var(--SmartThemeBotMesBlurTintColor, #333);
+    border: 1px solid var(--SmartThemeBorderColor, #666);
+    border-radius: 5px;
+    padding: 0.3rem 0.55rem;
+    font: inherit;
+}
+.kacha button { cursor: pointer; }
+.kacha button:disabled { opacity: 0.55; cursor: default; }
+.kacha button[aria-pressed="true"] { border-color: currentColor; }
+.kacha select { min-width: 0; max-width: 100%; }
+.kacha-row select { flex: 1; }
+.kacha input:not([type="checkbox"], [type="file"]), .kacha textarea {
+    width: 100%;
+    box-sizing: border-box;
+}
+.kacha textarea { min-height: 5rem; resize: vertical; }
+.kacha-toggles label { display: inline-flex; gap: 0.2rem; align-items: center; }
+.kacha-images, #kacha-history { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+.kacha-thumb { position: relative; width: 4.5rem; height: 4.5rem; }
+.kacha-thumb > button:first-child { width: 100%; height: 100%; padding: 0; overflow: hidden; display: block; }
+.kacha-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.kacha .kacha-remove { position: absolute; top: 0; right: 0; background: #111; color: #fff; padding: 0 0.3rem; }
+#kacha-result .kacha-thumb { width: min(100%, 15rem); height: auto; }
+#kacha-result .kacha-thumb img { height: auto; }
+#kacha-status:not(:empty) { margin-top: 0.55rem; }
+.kacha-viewer { width: fit-content; padding: 0.3rem; }
+.kacha-viewer img { display: block; max-width: min(90vw, 70rem); max-height: 80dvh; object-fit: contain; }
+.kacha-camera {
+    appearance: none;
+    background: transparent;
+    border: 0;
+    color: inherit;
+    padding: 0 0.15em;
+    font: inherit;
+    cursor: pointer;
+}
