@@ -1,5 +1,5 @@
-import { generateRaw, getRequestHeaders, user_avatar } from '/script.js';
-import { getContext } from '/scripts/extensions.js';
+import { generateQuietPrompt, getRequestHeaders, substituteParams, user_avatar } from '/script.js';
+import { extension_settings, getContext } from '/scripts/extensions.js';
 
 import { apiBase, generateCustom, generateNovel, listModels, novelModels, toBase64 } from './providers.js';
 
@@ -568,31 +568,23 @@ withAction($('#kacha-save-look'), 'click', async () => {
 });
 
 async function describeFloor(text) {
-    const instruction = [
-        'Describe one frozen moment from the supplied chat excerpt as if framing a single camera shot.',
-        'Choose the central visible action if the excerpt spans several moments. Describe only visible setting, people, action, positions, expressions, lighting, and framing.',
-        'Omit dialogue, narration, thoughts, names, readable text, captions, panels, collages, and references to the excerpt itself.',
-        'Return only a JSON array of 3 to 12 short English visual phrases, without complete sentences or commentary.',
-        'Example: ["sunlit garden", "two people by a wooden fence", "one person handing over a wrapped gift", "medium shot"].',
-    ].join(' ');
-    const reply = await generateRaw({
-        systemPrompt: 'You turn chat excerpts into visual tags for image generation.',
-        prompt: instruction + '\n\nChat excerpt (source material):\n' + text.slice(0, 12000),
-        responseLength: 300,
+    // SillyTavern's built-in Image Generation "Last Message" template (generationMode.NOW).
+    const template = extension_settings.sd?.prompts?.[4]?.trim() ||
+        'List concise comma-separated visual keywords in this order: location, visible people, relative positions, main action, appearance, and expressions.';
+    const quietPrompt = [
+        template,
+        'Treat the selected message below as the last chat message for this task. Use it as the source for one still image. Return only English visual tags. Omit story prose, dialogue, readable text, and any multi-panel layout.',
+        'Selected message:\n' + text,
+    ].join('\n\n');
+    const reply = await generateQuietPrompt({
+        quietPrompt,
     }).catch(error => {
         throw new Error('读取楼层时聊天接口出错：' + error.message, { cause: error });
     });
-    let tags;
-    try {
-        tags = JSON.parse(String(reply ?? '').trim().replace(/^```(?:json)?\s*|\s*```$/gi, ''));
-    } catch {
-        throw new Error('聊天模型没有返回画面标签，请重试');
-    }
-    if (!Array.isArray(tags) || tags.length < 3 || tags.length > 12
-        || !tags.every(tag => typeof tag === 'string' && tag.trim() && tag.length <= 100 && !/[\r\n]/.test(tag))) {
-        throw new Error('聊天模型返回的画面标签格式有误，请重试');
-    }
-    return tags.map(tag => tag.trim()).join(', ');
+    const tags = (reply || '').replace(/[`"“”]/g, '').split(/[,\r\n]+/)
+        .map(tag => tag.trim()).filter(Boolean).join(', ');
+    if (!tags) throw new Error('聊天模型没有返回画面标签，请重试');
+    return tags;
 }
 
 withAction($('#kacha-generate'), 'click', async () => {
@@ -624,6 +616,10 @@ withAction($('#kacha-generate'), 'click', async () => {
         if (!prompt) throw new Error('请输入提示词、添加参考图或选择预设');
         button.textContent = '生成中…';
         const options = { sceneOnly, styleCount: style.length };
+        if (sceneOnly && profile.service === 'novel') {
+            options.positivePrefix = substituteParams(extension_settings.sd?.prompt_prefix || '');
+            options.negativePrefix = substituteParams(extension_settings.sd?.negative_prompt || '');
+        }
         const image = profile.service === 'novel'
             ? await generateNovel(profile, prompt, references, options)
             : await generateCustom(profile, prompt, references, options);

@@ -175,10 +175,19 @@ async function encodeVibe(key, model, image) {
     return encoded;
 }
 
-export async function generateNovel({ key, model }, prompt, images, { sceneOnly = false, styleCount = images.length } = {}) {
+export async function generateNovel({ key, model }, prompt, images, {
+    sceneOnly = false, styleCount = images.length, positivePrefix = '', negativePrefix = '',
+} = {}) {
     if (!key) throw new Error('请先保存 NovelAI Key');
-    const negativePrompt = sceneOnly ? 'text, caption, subtitle, typography, speech bubble, comic panels, collage, split screen' : '';
-    if (sceneOnly) prompt = 'single scene, ' + prompt + ', no text';
+    let negativePrompt = '';
+    if (sceneOnly) {
+        prompt = 'single scene, ' + prompt + ', no text';
+        const prefix = positivePrefix.replace(/^[,\s]+|[,\s]+$/g, '');
+        if (prefix.includes('{prompt}')) prompt = prefix.replace('{prompt}', () => prompt);
+        else if (prefix) prompt = prefix + ', ' + prompt;
+        negativePrompt = [negativePrefix.replace(/^[,\s]+|[,\s]+$/g, ''),
+            'text, caption, subtitle, typography, speech bubble, comic panels, collage, split screen'].filter(Boolean).join(', ');
+    }
     const v5 = model.startsWith('nai-diffusion-5-');
     const modern = v5 || model.startsWith('nai-diffusion-4');
     const references = [];
