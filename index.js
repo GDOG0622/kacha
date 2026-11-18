@@ -4,10 +4,9 @@ import { getContext } from '/scripts/extensions.js';
 import { apiBase, generateCustom, generateNovel, listModels, novelModels, toBase64 } from './providers.js';
 
 const libraryFile = 'kacha-library-v1.json';
-const configKey = 'kacha:service-config:v1';
+const profilesFile = 'kacha-api-profiles-v1.json';
 const defaultNovelModel = 'nai-diffusion-3';
 const historyKey = 'kacha:images:v1';
-const servicesKey = 'kacha:service';
 const validImage = value => typeof value === 'string' && /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(value);
 const newId = () => globalThis.crypto.randomUUID?.() ?? Array.from(globalThis.crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
 const dialog = document.createElement('dialog');
@@ -28,7 +27,7 @@ dialog.innerHTML = `
     <main>
         <section data-view="generate">
             <div class="kacha-row">
-                <select id="kacha-service" aria-label="服务"><option value="custom">自定义</option><option value="novel">NovelAI</option></select>
+                <select id="kacha-service" aria-label="API 组合"></select>
                 <select id="kacha-preset" aria-label="预设"></select>
             </div>
             <textarea id="kacha-prompt" placeholder="提示词" aria-label="提示词"></textarea>
@@ -65,19 +64,24 @@ dialog.innerHTML = `
         </section>
         <section data-view="history" hidden><div id="kacha-history"></div></section>
         <section data-view="settings" hidden>
+            <div class="kacha-row">
+                <select id="kacha-edit-profile" aria-label="编辑 API 组合"></select>
+                <button type="button" id="kacha-delete-profile">删除</button>
+            </div>
+            <input id="kacha-profile-name" placeholder="API 组合名称" aria-label="API 组合名称" maxlength="80">
             <select id="kacha-settings-service" aria-label="配置服务"><option value="custom">自定义</option><option value="novel">NovelAI</option></select>
-            <form id="kacha-custom">
+            <div id="kacha-custom">
                 <label>API URL<input id="kacha-url" type="url" placeholder="https://example.com/v1" required></label>
                 <label>API Key<input id="kacha-key" type="password" autocomplete="off"></label>
-                <div class="kacha-row"><button type="submit">连接</button><select id="kacha-model" aria-label="模型" disabled></select></div>
-            </form>
-            <form id="kacha-novel" hidden>
+                <div class="kacha-row"><button type="button" id="kacha-connect">连接</button><select id="kacha-model" aria-label="模型" disabled></select></div>
+            </div>
+            <div id="kacha-novel" hidden>
                 <label>NovelAI Key<input id="kacha-novel-key" type="password" autocomplete="off"></label>
                 <div class="kacha-row">
                     <select id="kacha-novel-model" aria-label="NovelAI 模型"></select>
-                    <button type="submit">保存</button>
                 </div>
-            </form>
+            </div>
+            <button type="button" id="kacha-save-profile">保存</button>
         </section>
     </main>
     <footer id="kacha-status" role="status"></footer>`;
@@ -85,36 +89,57 @@ const $ = selector => dialog.querySelector(selector);
 const images = { draft: [], preset: [], look: [] };
 let library = { presets: [], looks: {} };
 let libraryReady = false;
-let config = {};
+let profiles = { entries: [], active: null };
+let profilesReady = false;
+let profileWrite;
 let target = {};
 let activeTab;
 let connected;
 let generationId = 0;
 
-function loadConfig() {
-    try {
-        return JSON.parse(localStorage.getItem(configKey)) || {};
-    } catch {
-        return {};
-    }
+async function readAccountFile(file) {
+    const response = await fetch('/user/files/' + file, { cache: 'no-store' });
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error('无法读取酒馆账号数据');
+    return response.json();
 }
 
-function saveConfig(service, value) {
-    const next = { ...loadConfig(), [service]: value };
-    try {
-        localStorage.setItem(configKey, JSON.stringify(next));
-    } catch {
-        throw new Error('浏览器无法保存服务设置');
+async function writeAccountFile(file, value) {
+    const bytes = new TextEncoder().encode(JSON.stringify(value));
+    if (bytes.length > 40 * 1024 * 1024) throw new Error('酒馆文件空间不足');
+    const response = await fetch('/api/files/upload', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({ name: file, data: toBase64(bytes) }),
+    });
+    if (!response.ok) throw new Error('无法保存酒馆账号数据');
+}
+
+async function loadProfiles() {
+    const stored = await readAccountFile(profilesFile);
+    if (stored) {
+        if (!Array.isArray(stored.entries)) throw new Error('API 组合文件格式有误');
+        return stored;
     }
-    config = next;
+    return { entries: [], active: null };
+}
+
+async function saveProfiles(next) {
+    if (!profilesReady) throw new Error('API 组合尚未加载，请重新打开面板');
+    if (profileWrite) throw new Error('API 组合正在保存');
+    profileWrite = writeAccountFile(profilesFile, next);
+    try {
+        await profileWrite;
+        profiles = next;
+    } finally {
+        profileWrite = undefined;
+    }
 }
 
 async function loadLibrary() {
-    const response = await fetch('/user/files/' + libraryFile, { cache: 'no-store' });
-    if (response.status === 404) return { presets: [], looks: {} };
-    if (!response.ok) throw new Error('无法读取酒馆预设库');
-    const data = await response.json();
-    if (!Array.isArray(data?.presets) || !data.looks || typeof data.looks !== 'object') throw new Error('酒馆预设库格式有误');
+    const data = await readAccountFile(libraryFile);
+    if (!data) return { presets: [], looks: {} };
+    if (!Array.isArray(data.presets) || !data.looks || typeof data.looks !== 'object') throw new Error('酒馆预设库格式有误');
     return data;
 }
 
@@ -299,37 +324,45 @@ function showHistory() {
 
 async function saveLibrary(next) {
     if (!libraryReady) throw new Error('预设库尚未加载，请重新打开面板');
-    const bytes = new TextEncoder().encode(JSON.stringify(next));
-    if (bytes.length > 40 * 1024 * 1024) throw new Error('预设库空间不足');
-    const response = await fetch('/api/files/upload', {
-        method: 'POST',
-        headers: getRequestHeaders(),
-        body: JSON.stringify({ name: libraryFile, data: toBase64(bytes) }),
-    });
-    if (!response.ok) throw new Error('无法保存酒馆预设库');
+    await writeAccountFile(libraryFile, next);
     library = next;
 }
 
-function showConfig() {
-    connected = undefined;
-    $('#kacha-key').value = $('#kacha-novel-key').value = '';
-    $('#kacha-url').value = config.custom?.url || '';
-    $('#kacha-key').placeholder = config.custom?.key ? '已保存' : '';
-    $('#kacha-novel-key').placeholder = config.novel?.key ? '已保存' : '';
-    const novelSelect = $('#kacha-novel-model');
-    novelSelect.replaceChildren(...novelModels.map(([id, name]) => new Option(name, id)));
-    novelSelect.value = config.novel?.model || defaultNovelModel;
-    if (!novelSelect.value) novelSelect.value = defaultNovelModel;
-    const choices = config.custom?.model ? [{ id: config.custom.model, name: config.custom.model }] : [];
-    setOptions($('#kacha-model'), choices, '模型', config.custom?.model);
-    $('#kacha-model').disabled = true;
+function renderProfiles(editorId = profiles.active) {
+    const select = $('#kacha-service');
+    select.replaceChildren();
+    if (!profiles.entries.length) select.add(new Option('配置 API', ''));
+    for (const entry of profiles.entries) select.add(new Option(entry.name, entry.id));
+    select.value = profiles.active || '';
+    if (select.selectedIndex < 0) select.selectedIndex = 0;
+    setOptions($('#kacha-edit-profile'), profiles.entries, '新建 API 组合', editorId);
+    editProfile();
 }
 
-function selectService(service) {
-    $('#kacha-service').value = $('#kacha-settings-service').value = service;
+function editProfile() {
+    const profile = profiles.entries.find(item => item.id === $('#kacha-edit-profile').value);
+    connected = undefined;
+    $('#kacha-profile-name').value = profile?.name || '';
+    $('#kacha-delete-profile').disabled = !profile;
+    $('#kacha-settings-service').value = profile?.service || 'custom';
+    $('#kacha-url').value = profile?.url || '';
+    $('#kacha-key').value = $('#kacha-novel-key').value = '';
+    $('#kacha-key').placeholder = profile?.service === 'custom' && profile.key ? '已保存' : '';
+    $('#kacha-novel-key').placeholder = profile?.service === 'novel' && profile.key ? '已保存' : '';
+    const choices = profile?.service === 'custom' && profile.model ? [{ id: profile.model, name: profile.model }] : [];
+    setOptions($('#kacha-model'), choices, '选择模型', profile?.model);
+    $('#kacha-model').disabled = true;
+    const novelSelect = $('#kacha-novel-model');
+    novelSelect.replaceChildren(...novelModels.map(([id, name]) => new Option(name, id)));
+    novelSelect.value = profile?.model || defaultNovelModel;
+    if (!novelSelect.value) novelSelect.value = defaultNovelModel;
+    showServiceFields();
+}
+
+function showServiceFields() {
+    const service = $('#kacha-settings-service').value;
     $('#kacha-custom').hidden = service !== 'custom';
     $('#kacha-novel').hidden = service !== 'novel';
-    try { localStorage.setItem(servicesKey, service); } catch { /* Storage can be disabled. */ }
 }
 
 function getTarget(messageIndex) {
@@ -361,28 +394,41 @@ async function open(messageIndex) {
     renderImages('draft');
     renderLook();
     tab('generate');
-    let service = 'custom';
-    try { if (localStorage.getItem(servicesKey) === 'novel') service = 'novel'; } catch { /* Use default. */ }
-    selectService(service);
+    profiles = { entries: [], active: null };
+    profilesReady = false;
+    renderProfiles();
     dialog.showModal();
     const currentOpen = generationId;
-    config = loadConfig();
-    showConfig();
-    try {
-        const nextLibrary = await loadLibrary();
-        if (currentOpen !== generationId || !dialog.open) return;
-        library = nextLibrary;
-        libraryReady = true;
-        renderPresets();
-        renderLook();
-        for (const type of ['char', 'user']) $('#kacha-' + type).disabled = !library.looks[lookKey(type)];
-    } catch (error) {
-        if (currentOpen === generationId && dialog.open) status(error.message);
-    }
+    const isCurrent = () => currentOpen === generationId && dialog.open;
+    await Promise.all([
+        loadProfiles().then(next => {
+            if (!isCurrent()) return;
+            profiles = next;
+            profilesReady = true;
+            renderProfiles();
+        }).catch(error => { if (isCurrent()) status(error.message); }),
+        loadLibrary().then(next => {
+            if (!isCurrent()) return;
+            library = next;
+            libraryReady = true;
+            renderPresets();
+            renderLook();
+            for (const type of ['char', 'user']) $('#kacha-' + type).disabled = !library.looks[lookKey(type)];
+        }).catch(error => { if (isCurrent()) status(error.message); }),
+    ]);
 }
 
-$('#kacha-service').addEventListener('change', event => selectService(event.target.value));
-$('#kacha-settings-service').addEventListener('change', event => selectService(event.target.value));
+withAction($('#kacha-service'), 'change', async event => {
+    const select = event.target;
+    try {
+        await saveProfiles({ ...profiles, active: select.value });
+    } catch (error) {
+        select.value = profiles.active || '';
+        throw error;
+    }
+});
+$('#kacha-edit-profile').addEventListener('change', editProfile);
+$('#kacha-settings-service').addEventListener('change', showServiceFields);
 $('#kacha-edit-preset').addEventListener('change', editPreset);
 $('#kacha-look-type').addEventListener('change', renderLook);
 $('[data-close]').addEventListener('click', () => dialog.close());
@@ -400,42 +446,61 @@ for (const input of [$('#kacha-url'), $('#kacha-key')]) input.addEventListener('
     $('#kacha-model').disabled = true;
 });
 
-withAction($('#kacha-custom'), 'submit', async () => {
+withAction($('#kacha-connect'), 'click', async () => {
     const currentOpen = generationId;
+    const editorId = $('#kacha-edit-profile').value;
+    const previous = profiles.entries.find(item => item.id === editorId && item.service === 'custom');
     const inputUrl = $('#kacha-url').value.trim();
     const inputKey = $('#kacha-key').value.trim();
     const url = apiBase(inputUrl);
-    const key = inputKey || (config.custom?.url === url ? config.custom.key : '');
+    const key = inputKey || (previous?.url === url ? previous.key : '');
     if (!key) throw new Error('请输入 API Key');
     const models = await listModels(url, key);
-    if (currentOpen !== generationId || !dialog.open
-        || $('#kacha-url').value.trim() !== inputUrl || $('#kacha-key').value.trim() !== inputKey) return;
+    if (currentOpen !== generationId || !dialog.open || editorId !== $('#kacha-edit-profile').value
+        || $('#kacha-settings-service').value !== 'custom' || $('#kacha-url').value.trim() !== inputUrl || $('#kacha-key').value.trim() !== inputKey) return;
     connected = { url, key };
-    const previous = config.custom?.url === url ? config.custom.model : undefined;
-    setOptions($('#kacha-model'), models.map(id => ({ id, name: id })), '选择模型', previous);
+    setOptions($('#kacha-model'), models.map(id => ({ id, name: id })), '选择模型',
+        previous?.url === url ? previous.model : '');
     $('#kacha-model').disabled = !models.length;
     if (!models.length) status('服务未返回模型');
-    else if ($('#kacha-model').value) saveModel();
 });
 
-function saveModel() {
-    const model = $('#kacha-model').value;
-    if (!model || !connected) return;
-    saveConfig('custom', { ...connected, model });
-    $('#kacha-key').value = '';
-    $('#kacha-key').placeholder = '已保存';
+withAction($('#kacha-save-profile'), 'click', async () => {
+    const service = $('#kacha-settings-service').value;
+    const name = $('#kacha-profile-name').value.trim();
+    if (!name) throw new Error('请输入 API 组合名称');
+    const id = $('#kacha-edit-profile').value || newId();
+    const existing = profiles.entries.find(item => item.id === id);
+    const previous = existing?.service === service ? existing : null;
+    const profile = { id, name, service };
+    if (service === 'custom') {
+        const url = apiBase($('#kacha-url').value.trim());
+        const fallback = previous?.url === url ? previous.key : '';
+        const key = $('#kacha-key').value.trim() || fallback;
+        const model = $('#kacha-model').value;
+        if (!model || !key || (!connected && (!previous || url !== previous.url || key !== previous.key))) {
+            throw new Error('请连接服务并选择模型');
+        }
+        Object.assign(profile, { url, key, model });
+    } else {
+        const key = $('#kacha-novel-key').value.trim() || previous?.key;
+        if (!key) throw new Error('请输入 NovelAI Key');
+        Object.assign(profile, { key, model: $('#kacha-novel-model').value });
+    }
+    const entries = existing
+        ? profiles.entries.map(item => item.id === id ? profile : item)
+        : [...profiles.entries, profile];
+    await saveProfiles({ entries, active: id });
+    renderProfiles(id);
     status('已保存');
-}
+});
 
-withAction($('#kacha-model'), 'change', saveModel);
-withAction($('#kacha-novel'), 'submit', () => {
-    const input = $('#kacha-novel-key');
-    const key = input.value.trim() || config.novel?.key;
-    if (!key) throw new Error('请输入 NovelAI Key');
-    saveConfig('novel', { key, model: $('#kacha-novel-model').value });
-    input.value = '';
-    input.placeholder = '已保存';
-    status('已保存');
+withAction($('#kacha-delete-profile'), 'click', async () => {
+    const id = $('#kacha-edit-profile').value;
+    if (!id || !window.confirm('删除这个 API 组合？')) return;
+    const entries = profiles.entries.filter(item => item.id !== id);
+    await saveProfiles({ entries, active: profiles.active === id ? entries[0]?.id ?? null : profiles.active });
+    renderProfiles();
 });
 
 withAction($('#kacha-save-preset'), 'click', async () => {
@@ -507,7 +572,11 @@ withAction($('#kacha-generate'), 'click', async () => {
     const currentOpen = generationId;
     try {
         button.textContent = '生成中…';
-        const service = $('#kacha-service').value;
+        const profile = profiles.entries.find(item => item.id === $('#kacha-service').value);
+        if (!profile) {
+            tab('settings');
+            throw new Error('请先保存一套 API 组合');
+        }
         const preset = library.presets.find(item => item.id === $('#kacha-preset').value);
         const looks = ['char', 'user'].filter(type => {
             const checkbox = $('#kacha-' + type);
@@ -529,9 +598,9 @@ withAction($('#kacha-generate'), 'click', async () => {
         const prompt = parts.filter(Boolean).join('\n') || (references.length ? 'Generate an image guided by the supplied reference images.' : '');
         if (!prompt) throw new Error('请输入提示词、添加参考图或选择预设');
         button.textContent = '生成中…';
-        const image = service === 'novel'
-            ? await generateNovel(config.novel || { model: defaultNovelModel }, prompt, references)
-            : await generateCustom(config.custom || {}, prompt, references);
+        const image = profile.service === 'novel'
+            ? await generateNovel(profile, prompt, references)
+            : await generateCustom(profile, prompt, references);
         if (!validImage(image)) throw new Error('服务返回的图片无效');
         const saved = saveImage({ id: newId(), image });
         if (currentOpen === generationId && dialog.open) {
@@ -548,19 +617,23 @@ document.body.append(dialog, viewer);
 function decorate(row) {
     const edit = row.querySelector('.mes_edit');
     if (!edit || row.querySelector('.kacha-camera')) return;
-    const camera = document.createElement('button');
-    camera.type = 'button';
-    camera.className = 'kacha-camera interactable';
+    const camera = document.createElement('div');
+    camera.className = 'mes_button kacha-camera fa-solid fa-camera';
+    camera.tabIndex = 0;
     camera.title = '生图';
+    camera.setAttribute('role', 'button');
     camera.setAttribute('aria-label', '生图');
-    const icon = document.createElement('i');
-    icon.className = 'fa-solid fa-camera';
-    camera.append(icon);
+    camera.addEventListener('keydown', event => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (!event.repeat) camera.click();
+    });
     const hint = row.querySelector('.extraMesButtonsHint');
     if (hint) hint.before(camera);
     else edit.after(camera);
-    if (['none', 'normal', '""', "''"].includes(getComputedStyle(icon, '::before').content)) {
-        icon.className = 'fa-solid fa-image';
+    if (['none', 'normal', '""', "''"].includes(getComputedStyle(camera, '::before').content)) {
+        camera.classList.replace('fa-camera', 'fa-image');
     }
 }
 

@@ -14,7 +14,7 @@
 .kacha::backdrop { background: #0008; }
 .kacha [hidden] { display: none !important; }
 .kacha main { margin-top: 0.75rem; }
-.kacha section, .kacha form { display: grid; gap: 0.65rem; }
+.kacha section, .kacha #kacha-custom, .kacha #kacha-novel { display: grid; gap: 0.65rem; }
 .kacha nav, .kacha-row { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
 .kacha header nav { margin-left: auto; }
 .kacha header strong { white-space: nowrap; }
@@ -47,15 +47,6 @@
 #kacha-status:not(:empty) { margin-top: 0.55rem; }
 .kacha-viewer { width: fit-content; padding: 0.3rem; }
 .kacha-viewer img { display: block; max-width: min(90vw, 70rem); max-height: 80dvh; object-fit: contain; }
-.kacha-camera {
-    appearance: none;
-    background: transparent;
-    border: 0;
-    color: inherit;
-    padding: 0 0.15em;
-    font: inherit;
-    cursor: pointer;
-}
 .kacha #kacha-generate {
     margin-left: auto;
     width: auto;
