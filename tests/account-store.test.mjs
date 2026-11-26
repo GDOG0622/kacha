@@ -82,3 +82,37 @@ test('a successful upload is not reported saved when readback disagrees', async 
     await assert.rejects(f.store.save(base, { presets: [{ id: 'new' }], looks: {} }), /无法确认服务器数据/);
     assert.equal(f.uploads, 1);
 });
+
+test('upload connection failure and timeout are reported distinctly', async () => {
+    const empty = () => ({ presets: [], looks: {} });
+    for (const timeout of [false, true]) {
+        const store = createAccountStore({
+            file: 'test.json', empty, validate: () => true, headers: () => ({}),
+            encode: bytes => Buffer.from(bytes).toString('base64'), uploadTimeoutMs: 10,
+            fetcher: async (_url, options) => {
+                if (options.method !== 'POST') return { status: 404 };
+                if (!timeout) throw new TypeError('network failure');
+                return new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(new Error('aborted'))));
+            },
+        });
+        await assert.rejects(store.save(empty(), { presets: [{ id: 'a' }], looks: {} }), timeout ? /上传超时/ : /上传连接中断/);
+    }
+});
+
+test('a lost upload response is recovered when the server already stored the data', async () => {
+    let file = null;
+    const empty = () => ({ presets: [], looks: {} });
+    const store = createAccountStore({
+        file: 'test.json', empty, validate: () => true, headers: () => ({}),
+        encode: bytes => Buffer.from(bytes).toString('base64'),
+        fetcher: async (_url, options) => {
+            if (options.method === 'POST') {
+                file = JSON.parse(Buffer.from(JSON.parse(options.body).data, 'base64').toString());
+                throw new TypeError('connection closed after write');
+            }
+            return file ? { ok: true, status: 200, json: async () => file } : { status: 404 };
+        },
+    });
+    const next = { presets: [{ id: 'saved' }], looks: {} };
+    assert.deepEqual(await store.save(empty(), next), next);
+});

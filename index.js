@@ -114,6 +114,9 @@ let target = {};
 let activeTab;
 let connected;
 let generationId = 0;
+let interactionVersion = 0;
+let panelInteractionStart = 0;
+let hasAccountData = false;
 
 const accountStoreOptions = { headers: getRequestHeaders, encode: toBase64 };
 const profileStore = createAccountStore({ ...accountStoreOptions, file: profilesFile,
@@ -170,10 +173,11 @@ function withAction(element, eventName, action) {
         element.dataset.busy = 'true';
         if (element instanceof HTMLButtonElement) element.disabled = true;
         status();
+        const actionGeneration = generationId;
         try {
             await action(event);
         } catch (error) {
-            status(error.message);
+            if (actionGeneration === generationId && dialog.open) status(error.message);
         } finally {
             delete element.dataset.busy;
             if (element instanceof HTMLButtonElement) element.disabled = false;
@@ -397,10 +401,11 @@ function getTarget(messageIndex) {
 async function open(messageIndex) {
     showJobStatus('');
     target = getTarget(messageIndex);
+    panelInteractionStart = interactionVersion;
     renderPresets();
     $('#kacha-result').replaceChildren();
     $('#kacha-floor').disabled = !target.text;
-    for (const type of ['char', 'user']) $('#kacha-' + type).disabled = true;
+    for (const type of ['char', 'user']) $('#kacha-' + type).disabled = !hasAccountData || !library.looks[lookKey(type)];
     renderImages('draft');
     renderLook();
     tab('generate');
@@ -412,22 +417,31 @@ async function open(messageIndex) {
 async function reloadAccountData() {
     const currentOpen = ++generationId;
     const isCurrent = () => currentOpen === generationId && dialog.open;
-    libraryReady = profilesReady = false;
-    dialog.querySelector('main').inert = true;
+    const initialProfiles = profiles;
+    const initialLibrary = library;
+    libraryReady = profilesReady = hasAccountData;
+    dialog.querySelector('main').inert = !hasAccountData;
     $('#kacha-retry').hidden = true;
-    $('#kacha-load-status').textContent = '正在读取预设、样貌和 API 组合…';
+    $('#kacha-load-status').textContent = hasAccountData ? '正在后台同步…' : '正在读取预设、样貌和 API 组合…';
     const [profileResult, libraryResult] = await Promise.allSettled([profileStore.load(), libraryStore.load()]);
     if (!isCurrent()) return;
     const errors = [];
     if (profileResult.status === 'rejected') errors.push('API 组合：' + profileResult.reason.message);
     if (libraryResult.status === 'rejected') errors.push('预设和样貌：' + libraryResult.reason.message);
     if (errors.length) {
-        $('#kacha-load-status').textContent = errors.join('；');
+        $('#kacha-load-status').textContent = (hasAccountData ? '同步失败，当前显示上次读取的数据。' : '') + errors.join('；');
         $('#kacha-retry').hidden = false;
+        return;
+    }
+    if (hasAccountData && interactionVersion !== panelInteractionStart) {
+        const changed = JSON.stringify(profileResult.value) !== JSON.stringify(initialProfiles)
+            || JSON.stringify(libraryResult.value) !== JSON.stringify(initialLibrary);
+        $('#kacha-load-status').textContent = changed ? '服务器数据已更新，当前编辑内容已保留；重新打开面板可读取最新数据。' : '';
         return;
     }
     profiles = profileResult.value;
     library = libraryResult.value;
+    hasAccountData = true;
     profilesReady = libraryReady = true;
     renderProfiles();
     renderPresets();
@@ -438,13 +452,19 @@ async function reloadAccountData() {
 }
 
 $('#kacha-retry').addEventListener('click', () => reloadAccountData());
+for (const eventName of ['click', 'input', 'change', 'paste']) {
+    dialog.querySelector('main').addEventListener(eventName, () => { interactionVersion++; }, true);
+}
 
 withAction($('#kacha-service'), 'change', async event => {
     const select = event.target;
+    const currentOpen = generationId;
     try {
+        status('正在保存…');
         await saveProfiles({ ...profiles, active: select.value });
+        if (currentOpen === generationId && dialog.open) status('已保存');
     } catch (error) {
-        select.value = profiles.active || '';
+        if (currentOpen === generationId && dialog.open) select.value = profiles.active || '';
         throw error;
     }
 });
@@ -506,6 +526,7 @@ withAction($('#kacha-connect'), 'click', async () => {
 });
 
 withAction($('#kacha-save-profile'), 'click', async () => {
+    const currentOpen = generationId;
     const service = $('#kacha-settings-service').value;
     const name = $('#kacha-profile-name').value.trim();
     if (!name) throw new Error('请输入 API 组合名称');
@@ -530,20 +551,27 @@ withAction($('#kacha-save-profile'), 'click', async () => {
     const entries = existing
         ? profiles.entries.map(item => item.id === id ? profile : item)
         : [...profiles.entries, profile];
+    status('正在保存…');
     await saveProfiles({ entries, active: id });
+    if (currentOpen !== generationId || !dialog.open) return;
     renderProfiles(id);
     status('已保存');
 });
 
 withAction($('#kacha-delete-profile'), 'click', async () => {
+    const currentOpen = generationId;
     const id = $('#kacha-edit-profile').value;
     if (!id || !window.confirm('删除这个 API 组合？')) return;
     const entries = profiles.entries.filter(item => item.id !== id);
+    status('正在删除…');
     await saveProfiles({ entries, active: profiles.active === id ? entries[0]?.id ?? null : profiles.active });
+    if (currentOpen !== generationId || !dialog.open) return;
     renderProfiles();
+    status('已删除');
 });
 
 withAction($('#kacha-save-preset'), 'click', async () => {
+    const currentOpen = generationId;
     const name = $('#kacha-preset-name').value.trim();
     const prompt = $('#kacha-preset-prompt').value.trim();
     const negativePrompt = $('#kacha-preset-negative').value.trim();
@@ -553,25 +581,33 @@ withAction($('#kacha-save-preset'), 'click', async () => {
     const presets = library.presets.some(item => item.id === id)
         ? library.presets.map(item => item.id === id ? preset : item)
         : [...library.presets, preset];
+    status('正在保存…');
     await saveLibrary({ ...library, presets });
+    if (currentOpen !== generationId || !dialog.open) return;
     renderPresets(id);
     status('已保存');
 });
 
 withAction($('#kacha-delete-preset'), 'click', async () => {
+    const currentOpen = generationId;
     const id = $('#kacha-edit-preset').value;
     if (!id || !window.confirm('删除这个预设？')) return;
+    status('正在删除…');
     await saveLibrary({ ...library, presets: library.presets.filter(item => item.id !== id) });
+    if (currentOpen !== generationId || !dialog.open) return;
     renderPresets();
+    status('已删除');
 });
 
 $('#kacha-import').addEventListener('click', () => $('#kacha-import-file').click());
 withAction($('#kacha-import-file'), 'change', async event => {
+    const currentOpen = generationId;
     const file = event.target.files[0];
     event.target.value = '';
     if (!file) return;
     if (file.size > 40 * 1024 * 1024) throw new Error('预设文件过大');
     const fileData = JSON.parse(await file.text());
+    if (currentOpen !== generationId || !dialog.open) return;
     const item = fileData.preset;
     if (fileData.format !== 'kacha-preset-v1' || typeof item?.name !== 'string' || !item.name.trim()
         || (item.negativePrompt !== undefined && typeof item.negativePrompt !== 'string')
@@ -582,7 +618,9 @@ withAction($('#kacha-import-file'), 'change', async event => {
         id: newId(), name: item.name.slice(0, 80), prompt: item.prompt,
         negativePrompt: item.negativePrompt ?? '', images: item.images,
     };
+    status('正在导入…');
     await saveLibrary({ ...library, presets: [...library.presets, preset] });
+    if (currentOpen !== generationId || !dialog.open) return;
     renderPresets(preset.id);
     status('已导入');
 });
@@ -600,6 +638,7 @@ $('#kacha-export').addEventListener('click', () => {
 });
 
 withAction($('#kacha-save-look'), 'click', async () => {
+    const currentOpen = generationId;
     const type = $('#kacha-look-type').value;
     const key = lookKey(type);
     if (!key) return;
@@ -607,7 +646,9 @@ withAction($('#kacha-save-look'), 'click', async () => {
     const looks = { ...library.looks };
     if (look.prompt || look.images.length) looks[key] = look;
     else delete looks[key];
+    status('正在保存…');
     await saveLibrary({ ...library, looks });
+    if (currentOpen !== generationId || !dialog.open) return;
     $('#kacha-' + type).disabled = !looks[key];
     status('已保存');
 });

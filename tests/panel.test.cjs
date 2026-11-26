@@ -14,6 +14,8 @@ test('panels reload saved presets and looks across floors and devices', {
     const files = new Map();
     let failReads = false;
     let delayReads = false;
+    let holdUpload = null;
+    let announceUpload = null;
     const root = path.resolve(__dirname, '..');
     async function newDevice() {
         const context = await browser.newContext();
@@ -31,6 +33,10 @@ test('panels reload saved presets and looks across floors and devices', {
                 return file ? route.fulfill({ contentType: 'application/json', body: file }) : route.fulfill({ status: 404 });
             }
             if (url.pathname === '/api/files/upload') {
+                if (holdUpload) {
+                    announceUpload();
+                    await holdUpload;
+                }
                 const body = request.postDataJSON();
                 files.set(body.name, Buffer.from(body.data, 'base64').toString());
                 return route.fulfill({ contentType: 'application/json', body: '{}' });
@@ -66,9 +72,30 @@ test('panels reload saved presets and looks across floors and devices', {
         await first.page.locator('#kacha-save-profile').click();
         await first.page.getByText('已保存', { exact: true }).waitFor();
         await first.page.locator('[data-close]').click();
+        delayReads = true;
         await first.page.locator('.kacha-camera').nth(1).click();
-        await first.page.getByText('正在读取预设、样貌和 API 组合…').waitFor({ state: 'hidden' });
+        await first.page.getByText('正在后台同步…').waitFor();
+        assert.equal(await first.page.locator('.kacha main').evaluate(el => el.inert), false);
         assert.equal(await first.page.locator('#kacha-preset option').count(), 2);
+        await first.page.getByText('正在后台同步…').waitFor({ state: 'hidden' });
+        delayReads = false;
+        await first.page.locator('[data-tab="presets"]').click();
+        const presetId = await first.page.locator('#kacha-preset option').nth(1).getAttribute('value');
+        await first.page.locator('#kacha-edit-preset').selectOption(presetId);
+        await first.page.locator('#kacha-preset-name').fill('更新后的画风');
+        let releaseUpload;
+        holdUpload = new Promise(resolve => { releaseUpload = resolve; });
+        const uploadStarted = new Promise(resolve => { announceUpload = resolve; });
+        await first.page.locator('#kacha-save-preset').click();
+        await uploadStarted;
+        await first.page.locator('[data-close]').click();
+        await first.page.locator('.kacha-camera').first().click();
+        await first.page.locator('[data-tab="presets"]').click();
+        await first.page.locator('#kacha-preset-name').fill('新楼层的未保存编辑');
+        releaseUpload();
+        holdUpload = null;
+        await first.page.getByText(/服务器数据已更新/).waitFor();
+        assert.equal(await first.page.locator('#kacha-preset-name').inputValue(), '新楼层的未保存编辑');
         const second = await newDevice();
         await second.page.locator('.kacha-camera').first().click();
         await second.page.getByText('正在读取预设、样貌和 API 组合…').waitFor({ state: 'hidden' });
@@ -77,16 +104,53 @@ test('panels reload saved presets and looks across floors and devices', {
         await second.page.locator('[data-tab="looks"]').click();
         assert.equal(await second.page.locator('#kacha-look-prompt').inputValue(), '黑发');
         await second.page.locator('[data-close]').click();
+        const changedLibrary = JSON.parse(files.get('kacha-library-v1.json'));
+        changedLibrary.looks['char:char.png'].prompt = '金发';
+        files.set('kacha-library-v1.json', JSON.stringify(changedLibrary));
+        delayReads = true;
+        await second.page.locator('.kacha-camera').first().click();
+        await second.page.getByText('正在后台同步…').waitFor();
+        await second.page.locator('[data-tab="looks"]').click();
+        assert.equal(await second.page.locator('#kacha-look-prompt').inputValue(), '黑发');
+        await second.page.locator('#kacha-look-prompt').fill('未保存的编辑');
+        await second.page.getByText(/服务器数据已更新/).waitFor();
+        assert.equal(await second.page.locator('#kacha-look-prompt').inputValue(), '未保存的编辑');
+        await second.page.locator('[data-close]').click();
+        await second.page.locator('.kacha-camera').first().click();
+        await second.page.getByText('正在后台同步…').waitFor({ state: 'hidden' });
+        await second.page.locator('[data-tab="looks"]').click();
+        assert.equal(await second.page.locator('#kacha-look-prompt').inputValue(), '金发');
+        await second.page.locator('[data-close]').click();
+        delayReads = false;
         failReads = true;
         await second.page.locator('.kacha-camera').first().click();
         await second.page.locator('#kacha-retry').waitFor({ state: 'visible' });
-        assert.equal(await second.page.locator('.kacha main').evaluate(el => el.inert), true);
+        assert.equal(await second.page.locator('.kacha main').evaluate(el => el.inert), false);
         failReads = false;
         await second.page.locator('#kacha-retry').click();
-        await second.page.locator('#kacha-retry').waitFor({ state: 'hidden' });
+        await second.page.locator('#kacha-load-status').waitFor({ state: 'hidden' });
         assert.equal(await second.page.locator('#kacha-preset option').count(), 2);
+        failReads = true;
+        const third = await newDevice();
+        await third.page.locator('.kacha-camera').first().click();
+        await third.page.locator('#kacha-retry').waitFor({ state: 'visible' });
+        assert.equal(await third.page.locator('.kacha main').evaluate(el => el.inert), true);
+        failReads = false;
+        await third.page.locator('#kacha-retry').click();
+        await third.page.waitForFunction(() => !document.querySelector('.kacha main').inert);
+        assert.equal(await third.page.locator('#kacha-preset option').count(), 2);
+        await third.page.locator('[data-tab="presets"]').click();
+        for (let i = 0; i < 6; i++) {
+            await third.page.locator('#kacha-edit-preset').selectOption('');
+            await third.page.locator('#kacha-preset-name').fill('预设 ' + i);
+            await third.page.locator('#kacha-preset-prompt').fill('prompt ' + i);
+            await third.page.locator('#kacha-save-preset').click();
+            await third.page.getByText('已保存', { exact: true }).waitFor();
+        }
+        assert.equal(JSON.parse(files.get('kacha-library-v1.json')).presets.length, 7);
         await first.context.close();
         await second.context.close();
+        await third.context.close();
     } finally {
         await browser.close();
     }

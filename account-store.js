@@ -1,6 +1,6 @@
 // Each store represents one SillyTavern account file. Keep its operations in
 // order within this page, and check the server before and after every write.
-export function createAccountStore({ file, empty, validate, headers, encode, fetcher = fetch }) {
+export function createAccountStore({ file, empty, validate, headers, encode, fetcher = fetch, uploadTimeoutMs = 45000 }) {
     let pending = Promise.resolve();
     let seenFile = false;
 
@@ -49,7 +49,7 @@ export function createAccountStore({ file, empty, validate, headers, encode, fet
             if (bytes.length > 40 * 1024 * 1024) throw new Error('数据超过 40 MB，无法保存');
             let response;
             const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 45000);
+            const timeout = setTimeout(() => controller.abort(), uploadTimeoutMs);
             try {
                 response = await fetcher('/api/files/upload', {
                     method: 'POST', headers: headers(),
@@ -57,7 +57,16 @@ export function createAccountStore({ file, empty, validate, headers, encode, fet
                     signal: controller.signal,
                 });
             } catch (error) {
-                throw new Error('保存结果无法确认，请重新打开面板检查', { cause: error });
+                clearTimeout(timeout);
+                const reason = controller.signal.aborted ? '上传超时' : '上传连接中断';
+                // The server may have committed the file before its response was lost.
+                try {
+                    if (JSON.stringify(await read()) === JSON.stringify(next)) return next;
+                } catch { /* The result remains unknown if readback also fails. */ }
+                const size = bytes.length < 1024 * 1024
+                    ? (bytes.length / 1024).toFixed(1) + ' KB'
+                    : (bytes.length / (1024 * 1024)).toFixed(1) + ' MB';
+                throw new Error(reason + '（数据 ' + size + '），服务器可能已经保存，请重新打开面板检查', { cause: error });
             } finally {
                 clearTimeout(timeout);
             }
