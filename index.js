@@ -2,6 +2,7 @@ import { generateRaw, getRequestHeaders, substituteParams, user_avatar } from '/
 import { extension_settings, getContext } from '/scripts/extensions.js';
 
 import { apiBase, generateCustom, generateNovel, listModels, novelModels, toBase64 } from './providers.js';
+import { createAccountStore } from './account-store.js';
 
 const libraryFile = 'kacha-library-v1.json';
 const profilesFile = 'kacha-api-profiles-v1.json';
@@ -87,7 +88,7 @@ dialog.innerHTML = `
             <button type="button" id="kacha-save-profile">保存</button>
         </section>
     </main>
-    <footer id="kacha-status" role="status"></footer>`;
+    <footer><div id="kacha-load-status" role="status"></div><button type="button" id="kacha-retry" hidden>重新读取</button><div id="kacha-status" role="status"></div></footer>`;
 const $ = selector => dialog.querySelector(selector);
 const imageJob = document.createElement('button');
 imageJob.type = 'button';
@@ -108,55 +109,32 @@ let libraryReady = false;
 let profiles = { entries: [], active: null };
 let profilesReady = false;
 let profileWrite;
+let libraryWrite;
 let target = {};
 let activeTab;
 let connected;
 let generationId = 0;
 
-async function readAccountFile(file) {
-    const response = await fetch('/user/files/' + file, { cache: 'no-store' });
-    if (response.status === 404) return null;
-    if (!response.ok) throw new Error('无法读取酒馆账号数据');
-    return response.json();
-}
-
-async function writeAccountFile(file, value) {
-    const bytes = new TextEncoder().encode(JSON.stringify(value));
-    if (bytes.length > 40 * 1024 * 1024) throw new Error('酒馆文件空间不足');
-    const response = await fetch('/api/files/upload', {
-        method: 'POST',
-        headers: getRequestHeaders(),
-        body: JSON.stringify({ name: file, data: toBase64(bytes) }),
-    });
-    if (!response.ok) throw new Error('无法保存酒馆账号数据');
-}
-
-async function loadProfiles() {
-    const stored = await readAccountFile(profilesFile);
-    if (stored) {
-        if (!Array.isArray(stored.entries)) throw new Error('API 组合文件格式有误');
-        return stored;
-    }
-    return { entries: [], active: null };
-}
+const accountStoreOptions = { headers: getRequestHeaders, encode: toBase64 };
+const profileStore = createAccountStore({ ...accountStoreOptions, file: profilesFile,
+    empty: () => ({ entries: [], active: null }),
+    validate: value => value && Array.isArray(value.entries),
+});
+const libraryStore = createAccountStore({ ...accountStoreOptions, file: libraryFile,
+    empty: () => ({ presets: [], looks: {} }),
+    validate: value => value && Array.isArray(value.presets) && value.looks && typeof value.looks === 'object' && !Array.isArray(value.looks),
+});
 
 async function saveProfiles(next) {
     if (!profilesReady) throw new Error('API 组合尚未加载，请重新打开面板');
     if (profileWrite) throw new Error('API 组合正在保存');
-    profileWrite = writeAccountFile(profilesFile, next);
+    profileWrite = profileStore.save(profiles, next);
     try {
         await profileWrite;
         profiles = next;
     } finally {
         profileWrite = undefined;
     }
-}
-
-async function loadLibrary() {
-    const data = await readAccountFile(libraryFile);
-    if (!data) return { presets: [], looks: {} };
-    if (!Array.isArray(data.presets) || !data.looks || typeof data.looks !== 'object') throw new Error('酒馆预设库格式有误');
-    return data;
 }
 
 function status(message = '') {
@@ -355,8 +333,14 @@ function showHistory() {
 
 async function saveLibrary(next) {
     if (!libraryReady) throw new Error('预设库尚未加载，请重新打开面板');
-    await writeAccountFile(libraryFile, next);
-    library = next;
+    if (libraryWrite) throw new Error('预设或样貌正在保存，请稍候');
+    libraryWrite = libraryStore.save(library, next);
+    try {
+        await libraryWrite;
+        library = next;
+    } finally {
+        libraryWrite = undefined;
+    }
 }
 
 function renderProfiles(editorId = profiles.active) {
@@ -413,9 +397,6 @@ function getTarget(messageIndex) {
 async function open(messageIndex) {
     showJobStatus('');
     target = getTarget(messageIndex);
-    generationId++;
-    libraryReady = false;
-    library = { presets: [], looks: {} };
     renderPresets();
     $('#kacha-result').replaceChildren();
     $('#kacha-floor').disabled = !target.text;
@@ -423,29 +404,40 @@ async function open(messageIndex) {
     renderImages('draft');
     renderLook();
     tab('generate');
-    profiles = { entries: [], active: null };
-    profilesReady = false;
     renderProfiles();
     dialog.showModal();
-    const currentOpen = generationId;
-    const isCurrent = () => currentOpen === generationId && dialog.open;
-    await Promise.all([
-        loadProfiles().then(next => {
-            if (!isCurrent()) return;
-            profiles = next;
-            profilesReady = true;
-            renderProfiles();
-        }).catch(error => { if (isCurrent()) status(error.message); }),
-        loadLibrary().then(next => {
-            if (!isCurrent()) return;
-            library = next;
-            libraryReady = true;
-            renderPresets();
-            renderLook();
-            for (const type of ['char', 'user']) $('#kacha-' + type).disabled = !library.looks[lookKey(type)];
-        }).catch(error => { if (isCurrent()) status(error.message); }),
-    ]);
+    await reloadAccountData();
 }
+
+async function reloadAccountData() {
+    const currentOpen = ++generationId;
+    const isCurrent = () => currentOpen === generationId && dialog.open;
+    libraryReady = profilesReady = false;
+    dialog.querySelector('main').inert = true;
+    $('#kacha-retry').hidden = true;
+    $('#kacha-load-status').textContent = '正在读取预设、样貌和 API 组合…';
+    const [profileResult, libraryResult] = await Promise.allSettled([profileStore.load(), libraryStore.load()]);
+    if (!isCurrent()) return;
+    const errors = [];
+    if (profileResult.status === 'rejected') errors.push('API 组合：' + profileResult.reason.message);
+    if (libraryResult.status === 'rejected') errors.push('预设和样貌：' + libraryResult.reason.message);
+    if (errors.length) {
+        $('#kacha-load-status').textContent = errors.join('；');
+        $('#kacha-retry').hidden = false;
+        return;
+    }
+    profiles = profileResult.value;
+    library = libraryResult.value;
+    profilesReady = libraryReady = true;
+    renderProfiles();
+    renderPresets();
+    renderLook();
+    for (const type of ['char', 'user']) $('#kacha-' + type).disabled = !library.looks[lookKey(type)];
+    dialog.querySelector('main').inert = false;
+    $('#kacha-load-status').textContent = '';
+}
+
+$('#kacha-retry').addEventListener('click', () => reloadAccountData());
 
 withAction($('#kacha-service'), 'change', async event => {
     const select = event.target;

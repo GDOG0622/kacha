@@ -45,6 +45,8 @@
 #kacha-result .kacha-thumb { width: min(100%, 15rem); height: auto; }
 #kacha-result .kacha-thumb img { height: auto; }
 #kacha-status:not(:empty) { margin-top: 0.55rem; }
+#kacha-load-status:not(:empty) { margin-top: 0.55rem; }
+#kacha-retry:not([hidden]) { margin-top: 0.4rem; }
 .kacha-viewer { width: fit-content; padding: 0.3rem; }
 .kacha-viewer img { display: block; max-width: min(90vw, 70rem); max-height: 80dvh; object-fit: contain; }
 .kacha #kacha-generate {
